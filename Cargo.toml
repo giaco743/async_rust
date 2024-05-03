@@ -1,0 +1,5 @@
+[workspace]
+members = ["runtime", "async_timer", "naive_async_timer", "intro", "coroutines", "pin", "raw_syscall", "syscall", "timer_event_queue", "self_ref"]
+
+[workspace.dependencies]
+tokio = { version = "1.37.0", features = ["full"] }
