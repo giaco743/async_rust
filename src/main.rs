@@ -1,8 +1,11 @@
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     future::Future,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll, Wake},
+    sync::Mutex,
+    task::{Context, Poll, Wake, Waker},
     thread,
     time::{Duration, Instant},
 };
@@ -47,60 +50,78 @@ impl Future for AsyncTimer {
     }
 }
 
-static mut READY_QUEUE: Vec<usize> = vec![];
-
-struct Executor {
-    futures: Vec<Pin<Box<dyn Future<Output = ()>>>>,
-    ready_queue: &'static mut Vec<usize>,
-}
-
-impl Executor {
-    fn new() -> Self {
-        unsafe {
-            Executor {
-                futures: vec![],
-                ready_queue: &mut READY_QUEUE,
-            }
-        }
-    }
-}
+type Task = Pin<Box<dyn Future<Output = ()>>>;
 
 struct MyWaker {
     idx: usize,
-    ready_queue: &'static mut Vec<usize>,
-}
-
-impl MyWaker {
-    fn new(idx: usize) -> Self {
-        unsafe {
-            MyWaker {
-                idx,
-                ready_queue: &mut READY_QUEUE,
-            }
-        }
-    }
+    ready_queue: Arc<Mutex<Vec<usize>>>,
+    thread: thread::Thread,
 }
 
 impl Wake for MyWaker {
     fn wake(self: Arc<Self>) {
-        unsafe { READY_QUEUE.push(self.idx) };
+        self.ready_queue.lock().unwrap().push(self.idx);
+        self.thread.unpark();
     }
 }
 
+struct Executor {
+    futures: RefCell<HashMap<usize, Task>>,
+    ready_queue: Arc<Mutex<Vec<usize>>>,
+    next_id: usize,
+}
+
 impl Executor {
+    fn new() -> Self {
+        Executor {
+            futures: RefCell::new(HashMap::new()),
+            // has to be arc and protected by a mutex, as we want to mutate the ready queue
+            // from potentially multiple threads via the waker instances
+            ready_queue: Arc::new(Mutex::new(vec![])),
+            next_id: 0,
+        }
+    }
+
+    fn get_waker(&self, idx: usize) -> Arc<MyWaker> {
+        Arc::new(MyWaker {
+            idx,
+            ready_queue: self.ready_queue.clone(),
+            thread: thread::current(),
+        })
+    }
+
     fn spawn(&mut self, future: impl Future<Output = ()> + 'static) {
         let pinned_future = Box::pin(future);
-        let idx = self.futures.len();
-        self.futures.push(pinned_future);
-        self.ready_queue.push(idx);
+        self.futures
+            .borrow_mut()
+            .insert(self.next_id, pinned_future);
+        self.ready_queue.lock().unwrap().push(self.next_id);
+        self.next_id += 1;
     }
     fn block(&mut self) {
         loop {
-            if let Some(idx) = self.ready_queue.pop() {
-                let future = &mut self.futures[idx];
-                let waker = Arc::new(MyWaker::new(idx)).into();
+            while let Some(idx) = self.ready_queue.lock().unwrap().pop() {
+                let mut future = self.futures.borrow_mut().remove(&idx).unwrap();
+                let waker: Waker = self.get_waker(idx).into();
                 let mut ctx = Context::from_waker(&waker);
-                let _ = future.as_mut().poll(&mut ctx);
+                match future.as_mut().poll(&mut ctx) {
+                    Poll::Ready(_) => (),
+                    Poll::Pending => {
+                        self.futures.borrow_mut().insert(idx, future);
+                    }
+                };
+            }
+            let tasks_count = self.futures.borrow().len();
+            let thread_name = thread::current().name().unwrap_or_default().to_string();
+            if tasks_count > 0 {
+                println!(
+                    "Waiting for tasks to be ready. {} tasks remaining. Parking thread {}.",
+                    tasks_count, thread_name,
+                );
+                thread::park();
+            } else {
+                println!("Everything done! No tasks left!");
+                break;
             }
         }
     }
@@ -115,9 +136,9 @@ async fn timering2() {
 }
 
 fn main() {
-    let mut runtime = Executor::new();
-    runtime.spawn(timering());
-    runtime.spawn(timering2());
-    runtime.block();
-    println!("Hello, world!");
+    let mut executor = Executor::new();
+    executor.spawn(timering());
+    executor.spawn(timering2());
+    executor.block();
+    println!("End of program!");
 }
