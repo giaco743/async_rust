@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     future::Future,
     pin::Pin,
@@ -66,7 +65,7 @@ impl Wake for MyWaker {
 }
 
 struct Executor {
-    futures: RefCell<HashMap<usize, Task>>,
+    futures: HashMap<usize, Task>,
     ready_queue: Arc<Mutex<Vec<usize>>>,
     next_id: usize,
 }
@@ -74,7 +73,7 @@ struct Executor {
 impl Executor {
     fn new() -> Self {
         Executor {
-            futures: RefCell::new(HashMap::new()),
+            futures: HashMap::new(),
             // has to be arc and protected by a mutex, as we want to mutate the ready queue
             // from potentially multiple threads via the waker instances
             ready_queue: Arc::new(Mutex::new(vec![])),
@@ -93,7 +92,6 @@ impl Executor {
     fn spawn(&mut self, future: impl Future<Output = ()> + 'static) {
         let pinned_future = Box::pin(future);
         self.futures
-            .borrow_mut()
             .insert(self.next_id, pinned_future);
         self.ready_queue.lock().unwrap().push(self.next_id);
         self.next_id += 1;
@@ -101,17 +99,17 @@ impl Executor {
     fn block(&mut self) {
         loop {
             while let Some(idx) = self.ready_queue.lock().unwrap().pop() {
-                let mut future = self.futures.borrow_mut().remove(&idx).unwrap();
+                let mut future = self.futures.remove(&idx).unwrap();
                 let waker: Waker = self.get_waker(idx).into();
                 let mut ctx = Context::from_waker(&waker);
                 match future.as_mut().poll(&mut ctx) {
                     Poll::Ready(_) => (),
                     Poll::Pending => {
-                        self.futures.borrow_mut().insert(idx, future);
+                        self.futures.insert(idx, future);
                     }
                 };
             }
-            let tasks_count = self.futures.borrow().len();
+            let tasks_count = self.futures.len();
             let thread_name = thread::current().name().unwrap_or_default().to_string();
             if tasks_count > 0 {
                 println!(
