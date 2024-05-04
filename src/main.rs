@@ -49,15 +49,15 @@ impl Future for AsyncTimer {
 
 static mut READY_QUEUE: Vec<usize> = vec![];
 
-struct Runtime {
+struct Executor {
     futures: Vec<Pin<Box<dyn Future<Output = ()>>>>,
     ready_queue: &'static mut Vec<usize>,
 }
 
-impl Runtime {
+impl Executor {
     fn new() -> Self {
         unsafe {
-            Runtime {
+            Executor {
                 futures: vec![],
                 ready_queue: &mut READY_QUEUE,
             }
@@ -87,7 +87,7 @@ impl Wake for MyWaker {
     }
 }
 
-impl Runtime {
+impl Executor {
     fn spawn(&mut self, future: impl Future<Output = ()> + 'static) {
         let pinned_future = Box::pin(future);
         let idx = self.futures.len();
@@ -115,7 +115,7 @@ async fn timering2() {
 }
 
 fn main() {
-    let mut runtime = Runtime::new();
+    let mut runtime = Executor::new();
     runtime.spawn(timering());
     runtime.spawn(timering2());
     runtime.block();
